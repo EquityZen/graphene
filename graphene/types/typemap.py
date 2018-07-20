@@ -13,13 +13,14 @@ from graphql import (
     GraphQLList,
     GraphQLNonNull,
     GraphQLString,
+    GraphQLError
 )
 from graphql.execution.executor import get_default_resolve_type_fn
 from graphql.type import GraphQLEnumValue
 from graphql.type.typemap import GraphQLTypeMap
 
 from ..utils.get_unbound_function import get_unbound_function
-from ..utils.str_converters import to_camel_case
+from ..utils.str_converters import to_camel_case, to_snake_case
 from .definitions import (
     GrapheneEnumType,
     GrapheneGraphQLType,
@@ -292,12 +293,33 @@ class TypeMap(GraphQLTypeMap):
                         description=arg.description,
                         default_value=arg.default_value,
                     )
+                resolver = self.get_resolver_for_type(type, name, field.default_value)
+                def auth_resolver(func):
+                    def auth_func(*args, **kwargs):
+                        auth_dict = getattr(type, 'auth', None)
+                        if auth_dict:
+                            obj = args[0]
+                            info = args[1]
+                            field_name = to_snake_case(info.field_name)
+                            authed = False
+                            available_auths = auth_dict.get(field_name, [])
+                            for auth_available_func in available_auths:
+                                if auth_available_func(obj, info):
+                                    authed = True
+
+                            if not authed:
+                                raise GraphQLError('You are not authorized! Obj: %s, Field: %s, User: %s' % (obj, field_name, info.context.user))
+
+                        return func(*args, **kwargs)
+                    return auth_func
+
+                if resolver:
+                    resolver = auth_resolver(resolver)
+
                 _field = GraphQLField(
                     field_type,
                     args=args,
-                    resolver=field.get_resolver(
-                        self.get_resolver_for_type(type, name, field.default_value)
-                    ),
+                    resolver=field.get_resolver(resolver),
                     deprecation_reason=field.deprecation_reason,
                     description=field.description,
                 )
@@ -308,6 +330,7 @@ class TypeMap(GraphQLTypeMap):
     def get_resolver_for_type(self, type, name, default_value):
         if not issubclass(type, ObjectType):
             return
+
         resolver = getattr(type, "resolve_{}".format(name), None)
         if not resolver:
             # If we don't find the resolver in the ObjectType class, then try to
